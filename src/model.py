@@ -1,59 +1,59 @@
 import torch
 import torch.nn.functional as F
-from torch.nn import Linear, Parameter
-from torch_geometric.nn import HeteroConv, SAGEConv, GCN2Conv
+from torch.nn import Linear
+from torch_geometric.nn import HeteroConv, SAGEConv
 
-class SHA256SolverGNN(torch.nn.Module):
-    def __init__(self, hidden_channels, num_layers=6, alpha=0.1, theta=0.5):
+class HGCNIISolver(torch.nn.Module):
+    def __init__(self, hidden_channels, num_layers=8, alpha=0.1, theta=0.5, use_inter_layer_res=True):
         super().__init__()
         self.num_layers = num_layers
-        self.alpha = alpha  # 初始残差的保留比例 (GCNII核心)
-        self.theta = theta  # 权重衰减比例
+        self.alpha = alpha
+        self.theta = theta
+        self.use_inter_layer_res = use_inter_layer_res # 消融开关：层间残差
 
-        # 1. 特征编码层 (Embedding)
-        # 变量特征：[Nonce, Message, State, Degree] -> 4维
         self.v_embed = Linear(4, hidden_channels)
-        # 子句特征：[Length] -> 1维
         self.c_embed = Linear(1, hidden_channels)
 
-        # 2. 异构卷积层堆叠
         self.convs = torch.nn.ModuleList()
-        for i in range(num_layers):
-            # 使用异构卷积处理：正向连接(pos)、负向连接(neg)和双向推导
-            conv = HeteroConv({
+        # GCNII 论文中提到的每一层可以有独立的权重，用于 Identity Mapping
+        self.v_weights = torch.nn.ModuleList([Linear(hidden_channels, hidden_channels) for _ in range(num_layers)])
+
+        for _ in range(num_layers):
+            self.convs.append(HeteroConv({
                 ('variable', 'pos_in', 'clause'): SAGEConv(hidden_channels, hidden_channels),
                 ('variable', 'neg_in', 'clause'): SAGEConv(hidden_channels, hidden_channels),
                 ('clause', 'rev_pos_in', 'variable'): SAGEConv(hidden_channels, hidden_channels),
                 ('clause', 'rev_neg_in', 'variable'): SAGEConv(hidden_channels, hidden_channels),
-            }, aggr='sum')
-            self.convs.append(conv)
+            }, aggr='sum'))
 
-        # 3. 输出头：映射到变量的活跃度分数
         self.final_lin = Linear(hidden_channels, 1)
 
     def forward(self, x_dict, edge_index_dict):
-        # A. 获取初始特征 h0 (GCNII 的锚点)
         v_h0 = F.relu(self.v_embed(x_dict['variable']))
         c_h0 = F.relu(self.c_embed(x_dict['clause']))
         
         v_h, c_h = v_h0, c_h0
 
-        # B. 深度消息传递循环
         for i in range(self.num_layers):
-            # 记录上一层状态
-            v_old, c_old = v_h, c_h
+            v_old, c_old = v_h, c_h # 用于层间残差
             
-            # 异构卷积
-            out_dict = self.convs[i]({'variable': v_h, 'clause': c_h}, edge_index_dict)
-            
-            # C. 融入 GCNII 思想的初始残差连接 (Initial Residual Connection)
-            # 核心公式：h_new = (1-alpha)*h_conv + alpha*h_0
-            v_h = (1 - self.alpha) * out_dict['variable'] + self.alpha * v_h0
-            c_h = (1 - self.alpha) * out_dict['clause'] + self.alpha * c_h0
-            
-            # 残差连接与激活
-            v_h = F.relu(v_h + v_old)
-            c_h = F.relu(c_h + c_old)
+            # 1. 异构卷积
+            out = self.convs[i]({'variable': v_h, 'clause': c_h}, edge_index_dict)
+            v_h, c_h = out['variable'], out['clause']
 
-        # D. 最终 Readout (只对变量节点进行预测)
+            # 2. 初始残差 (GCNII 核心: (1-alpha)*H + alpha*H0)
+            v_h = (1 - self.alpha) * v_h + self.alpha * v_h0
+            c_h = (1 - self.alpha) * c_h + self.alpha * c_h0
+
+            # 3. 恒等映射 (Identity Mapping: (1-beta)*I + beta*W)
+            beta = torch.log(torch.tensor(self.theta / (i + 1) + 1))
+            v_h = (1 - beta) * v_h + beta * self.v_weights[i](v_h)
+
+            # 4. 层间残差 (我们增加的部分，消融对比点)
+            if self.use_inter_layer_res:
+                v_h = v_h + v_old
+            
+            v_h = F.relu(v_h)
+            c_h = F.relu(c_h)
+
         return self.final_lin(v_h)
