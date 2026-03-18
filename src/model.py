@@ -46,7 +46,7 @@ class HGCNIISolver(torch.nn.Module):
             c_h = (1 - self.alpha) * c_h + self.alpha * c_h0
 
             # 3. 恒等映射 (Identity Mapping: (1-beta)*I + beta*W)
-            beta = torch.log(torch.tensor(self.theta / (i + 1) + 1))
+            beta = torch.log(torch.tensor(self.theta / (i + 1) + 1, device=v_h.device))
             v_h = (1 - beta) * v_h + beta * self.v_weights[i](v_h)
 
             # 4. 层间残差 (我们增加的部分，消融对比点)
