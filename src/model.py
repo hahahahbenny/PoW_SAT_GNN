@@ -9,13 +9,12 @@ class HGCNIISolver(torch.nn.Module):
         self.num_layers = num_layers
         self.alpha = alpha
         self.theta = theta
-        self.use_inter_layer_res = use_inter_layer_res # 消融开关：层间残差
+        self.use_inter_layer_res = use_inter_layer_res
 
         self.v_embed = Linear(4, hidden_channels)
         self.c_embed = Linear(1, hidden_channels)
 
         self.convs = torch.nn.ModuleList()
-        # GCNII 论文中提到的每一层可以有独立的权重，用于 Identity Mapping
         self.v_weights = torch.nn.ModuleList([Linear(hidden_channels, hidden_channels) for _ in range(num_layers)])
 
         for _ in range(num_layers):
@@ -31,29 +30,27 @@ class HGCNIISolver(torch.nn.Module):
     def forward(self, x_dict, edge_index_dict):
         v_h0 = F.relu(self.v_embed(x_dict['variable']))
         c_h0 = F.relu(self.c_embed(x_dict['clause']))
-        
         v_h, c_h = v_h0, c_h0
 
         for i in range(self.num_layers):
-            v_old, c_old = v_h, c_h # 用于层间残差
-            
+            v_old = v_h
             # 1. 异构卷积
             out = self.convs[i]({'variable': v_h, 'clause': c_h}, edge_index_dict)
             v_h, c_h = out['variable'], out['clause']
 
-            # 2. 初始残差 (GCNII 核心: (1-alpha)*H + alpha*H0)
+            # 2. 初始残差 (GCNII核心)
             v_h = (1 - self.alpha) * v_h + self.alpha * v_h0
             c_h = (1 - self.alpha) * c_h + self.alpha * c_h0
 
-            # 3. 恒等映射 (Identity Mapping: (1-beta)*I + beta*W)
+            # 3. 恒等映射 (Identity Mapping)
+            # 优化点：预指定 device 避免同步
             beta = torch.log(torch.tensor(self.theta / (i + 1) + 1, device=v_h.device))
             v_h = (1 - beta) * v_h + beta * self.v_weights[i](v_h)
 
-            # 4. 层间残差 (我们增加的部分，消融对比点)
+            # 4. 层间残差 (消融点)
             if self.use_inter_layer_res:
                 v_h = v_h + v_old
             
-            v_h = F.relu(v_h)
-            c_h = F.relu(c_h)
+            v_h, c_h = F.relu(v_h), F.relu(c_h)
 
         return self.final_lin(v_h)

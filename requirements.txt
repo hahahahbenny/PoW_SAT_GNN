@@ -1,0 +1,19 @@
+# 使用 extra-index-url 而不是 index-url
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# 基础库
+numpy
+pandas
+scipy
+scikit-learn
+tqdm
+matplotlib
+seaborn
+
+# 核心计算库
+torch
+
+# 异构图神经网络库
+torch-geometric
+torch-scatter
+torch-sparse

@@ -1,1 +1,4 @@
 gnn/
+data/processed
+data/cnf
+reulst/logs
